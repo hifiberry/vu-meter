@@ -1,0 +1,13 @@
+[Unit]
+Description=HiFiBerry VU Meter Service
+After=pipewire.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/vu-meter-service
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,25 @@
+Source: hifiberry-vu-meter
+Section: sound
+Priority: optional
+Maintainer: HiFiBerry <info@hifiberry.com>
+Build-Depends: debhelper-compat (= 13),
+               pkgconf,
+               libclang-dev,
+               libpipewire-0.3-dev
+Standards-Version: 4.6.0
+Homepage: https://github.com/hifiberry/hifiberry-os
+Vcs-Git: https://github.com/hifiberry/vu-meter.git
+Vcs-Browser: https://github.com/hifiberry/vu-meter
+
+Package: hifiberry-vu-meter
+Architecture: arm64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         pipewire,
+         nginx
+Description: HiFiBerry VU Meter Service
+ Real-time audio level monitoring service for HiFiBerry OS.
+ Captures audio levels from PipeWire and streams them via
+ WebSocket using a compact binary protocol.
+ .
+ Provides stereo RMS, peak, and clipping detection at 10Hz
+ for the HiFiBerry web UI VU meter display.

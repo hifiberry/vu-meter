@@ -1,0 +1,25 @@
+# HiFiBerry VU Meter WebSocket proxy configuration
+# Include this in the main nginx server block
+
+location /api/vu-meter/ {
+    proxy_pass http://localhost:2717/;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # WebSocket support
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_redirect off;
+
+    # Timeout settings
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+}

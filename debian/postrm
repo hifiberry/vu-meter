@@ -1,0 +1,27 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|purge)
+        # Remove nginx configuration
+        rm -f /etc/nginx/hifiberry-vu-meter.nginx
+
+        # Reload nginx if running
+        if nginx -t 2>/dev/null; then
+            if systemctl is-active --quiet nginx; then
+                systemctl reload nginx 2>/dev/null || true
+            fi
+        fi
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        :
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

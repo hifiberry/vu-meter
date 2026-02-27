@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # Install nginx configuration
+        if [ -f /usr/share/hifiberry-vu-meter/nginx/hifiberry-vu-meter.nginx ]; then
+            cp /usr/share/hifiberry-vu-meter/nginx/hifiberry-vu-meter.nginx /etc/nginx/hifiberry-vu-meter.nginx
+            echo "Installed VU meter nginx configuration."
+
+            # Test and reload nginx
+            if nginx -t 2>/dev/null; then
+                if systemctl is-active --quiet nginx; then
+                    systemctl reload nginx && echo "nginx reloaded successfully"
+                fi
+            else
+                echo "Warning: nginx configuration test failed"
+            fi
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

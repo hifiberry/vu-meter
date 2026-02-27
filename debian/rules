@@ -1,0 +1,56 @@
+#!/usr/bin/make -f
+
+# Rust build configuration
+export CARGO_HOME = $(CURDIR)/debian/cargo_home
+export CARGO_BUILD_JOBS = 1
+export CARGO_INCREMENTAL = 0
+export RUST_BACKTRACE = 0
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf target/
+	rm -rf $(CARGO_HOME)
+	find . -name "*.rlib" -delete 2>/dev/null || true
+	find . -name "*.rmeta" -delete 2>/dev/null || true
+
+override_dh_auto_configure:
+	# Install Rust if not available
+	if ! which cargo >/dev/null 2>&1; then \
+		mkdir -p $(CARGO_HOME); \
+		curl https://sh.rustup.rs -sSf | \
+		CARGO_HOME=$(CARGO_HOME) \
+		sh -s -- -y --no-modify-path; \
+	fi
+
+override_dh_auto_build:
+	mkdir -p $(CURDIR)/build_workspace/tmp $(CURDIR)/build_workspace/home
+	rm -rf $(CURDIR)/target/* 2>/dev/null || true
+	export TMPDIR="$(CURDIR)/build_workspace/tmp" && \
+	export HOME="$(CURDIR)/build_workspace/home" && \
+	export PATH="$(CARGO_HOME)/bin:$$PATH" && \
+	cargo build --release --jobs 1
+	rm -rf $(CURDIR)/build_workspace
+
+override_dh_auto_install:
+	# Install binary
+	mkdir -p debian/hifiberry-vu-meter/usr/bin
+	cp target/release/vu-meter-service debian/hifiberry-vu-meter/usr/bin/
+	strip debian/hifiberry-vu-meter/usr/bin/vu-meter-service
+
+	# Install systemd user service
+	mkdir -p debian/hifiberry-vu-meter/usr/lib/systemd/user
+	cp package-files/usr/lib/systemd/user/vu-meter.service debian/hifiberry-vu-meter/usr/lib/systemd/user/
+
+	# Install nginx config
+	mkdir -p debian/hifiberry-vu-meter/usr/share/hifiberry-vu-meter/nginx
+	cp package-files/etc/nginx/hifiberry-vu-meter.nginx debian/hifiberry-vu-meter/usr/share/hifiberry-vu-meter/nginx/
+
+override_dh_auto_test:
+	# Skip tests
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+	rm -rf $(CURDIR)/debian/hifiberry-vu-meter/usr/lib/debug

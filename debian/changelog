@@ -1,0 +1,10 @@
+hifiberry-vu-meter (0.1.0) stable; urgency=medium
+
+  * Initial release
+  * PipeWire audio level capture with binary WebSocket streaming
+  * Supports stereo L/R RMS, peak, and clipping detection
+  * Lightweight 6-byte binary protocol at 10Hz update rate
+  * REST version endpoint at /api/v1/version
+  * Nginx reverse proxy configuration for WebSocket support
+
+ -- HiFiBerry <support@hifiberry.com>  Thu, 27 Feb 2026 20:00:00 +0000
