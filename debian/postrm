@@ -5,6 +5,7 @@ case "$1" in
     remove|purge)
         # Remove nginx configuration
         rm -f /etc/nginx/hifiberry-vu-meter.nginx
+        rm -f /etc/nginx/hifiberry-api.d/hifiberry-vu-meter.nginx
 
         # Reload nginx if running
         if nginx -t 2>/dev/null; then
