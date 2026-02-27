@@ -1,7 +1,7 @@
 use pipewire as pw;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::pod::Pod;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -36,12 +36,13 @@ const NUM_CHANNELS: usize = 2;
 const UPDATE_INTERVAL_MS: u64 = 100;
 const MAX_VALUE_S32: f64 = 2147483648.0;
 
-/// Start the PipeWire capture. Returns the shared meter state and quit flag.
+/// Start the PipeWire capture. Returns the shared meter state, quit flag, and client counter.
 pub fn start_capture(
     target: Option<String>,
-) -> (Arc<Mutex<MeterState>>, Arc<AtomicBool>) {
+) -> (Arc<Mutex<MeterState>>, Arc<AtomicBool>, Arc<AtomicUsize>) {
     let state = Arc::new(Mutex::new(MeterState::default()));
     let quit = Arc::new(AtomicBool::new(false));
+    let clients = Arc::new(AtomicUsize::new(0));
 
     let buffer: Arc<Mutex<Vec<Vec<i32>>>> =
         Arc::new(Mutex::new(vec![Vec::new(); NUM_CHANNELS]));
@@ -56,6 +57,7 @@ pub fn start_capture(
     // Spawn processing thread that computes levels from the buffer
     let state_for_proc = state.clone();
     let quit_for_proc = quit.clone();
+    let clients_for_proc = clients.clone();
     thread::spawn(move || {
         let frames_per_update =
             (SAMPLE_RATE as f64 * UPDATE_INTERVAL_MS as f64 / 1000.0) as usize;
@@ -66,6 +68,21 @@ pub fn start_capture(
             }
 
             thread::sleep(Duration::from_millis(UPDATE_INTERVAL_MS));
+
+            // Only process when clients are connected
+            if clients_for_proc.load(Ordering::Relaxed) == 0 {
+                // Drain buffer to prevent unbounded growth while idle
+                if let Ok(mut buf) = buffer.lock() {
+                    for ch in buf.iter_mut() {
+                        ch.clear();
+                    }
+                }
+                // Reset meter state to zeros
+                if let Ok(mut s) = state_for_proc.lock() {
+                    s.channels = vec![ChannelLevels::default(); NUM_CHANNELS];
+                }
+                continue;
+            }
 
             let mut buf = buffer.lock().unwrap();
             let mut levels = vec![ChannelLevels::default(); NUM_CHANNELS];
@@ -123,7 +140,7 @@ pub fn start_capture(
         });
     }
 
-    (state, quit)
+    (state, quit, clients)
 }
 
 fn run_pipewire_loop(

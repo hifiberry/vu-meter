@@ -12,13 +12,17 @@ use axum::{
 };
 use capture::MeterState;
 use serde::Serialize;
-use std::sync::{atomic::Ordering, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use tokio::time::interval;
 
 #[derive(Clone)]
 struct AppState {
     meter: Arc<Mutex<MeterState>>,
+    clients: Arc<AtomicUsize>,
 }
 
 #[tokio::main]
@@ -36,10 +40,11 @@ async fn main() {
     }
 
     // Start PipeWire capture in background threads
-    let (meter_state, quit_flag) = capture::start_capture(target);
+    let (meter_state, quit_flag, clients) = capture::start_capture(target);
 
     let state = AppState {
         meter: meter_state,
+        clients,
     };
 
     let app = Router::new()
@@ -87,6 +92,10 @@ async fn ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    // Track this client
+    let prev = state.clients.fetch_add(1, Ordering::Relaxed);
+    eprintln!("Client connected ({} active)", prev + 1);
+
     // Send binary frames at ~10 Hz
     let mut tick = interval(Duration::from_millis(100));
 
@@ -129,4 +138,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             break; // Client disconnected
         }
     }
+
+    let remaining = state.clients.fetch_sub(1, Ordering::Relaxed) - 1;
+    eprintln!("Client disconnected ({} active)", remaining);
 }
