@@ -3,6 +3,8 @@ Section: sound
 Priority: optional
 Maintainer: HiFiBerry <info@hifiberry.com>
 Build-Depends: debhelper-compat (= 13),
+               curl,
+               ca-certificates,
                pkgconf,
                libclang-dev,
                libpipewire-0.3-dev
