@@ -4,9 +4,11 @@ hifiberry-vu-meter (0.1.2) stable; urgency=medium
     The VU meter is a read-only audio-level stream, so the whole service is
     "ok" (never prompts for a password). Previously the manifest existed only
     as an on-device file shipped by no package.
-  * Add curl + ca-certificates to Build-Depends. debian/rules rustup-installs
-    the Rust toolchain via curl, which is not in the current build chroot; the
-    build failed with "curl: not found" without this.
+  * Fix the Rust build under sbuild: add curl + ca-certificates to
+    Build-Depends (debian/rules rustup-installs the toolchain via curl, absent
+    from the chroot), and point RUSTUP_HOME at a writable build-dir path — the
+    sbuild build user's HOME is /sbuild-nonexistent, so rustup's default
+    $HOME/.rustup could not be created.
 
  -- HiFiBerry <support@hifiberry.com>  Fri, 17 Jul 2026 14:00:00 +0000
 

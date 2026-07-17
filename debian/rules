@@ -2,6 +2,7 @@
 
 # Rust build configuration
 export CARGO_HOME = $(CURDIR)/debian/cargo_home
+export RUSTUP_HOME = $(CURDIR)/debian/rustup_home
 export CARGO_BUILD_JOBS = 1
 export CARGO_INCREMENTAL = 0
 export RUST_BACKTRACE = 0
@@ -13,15 +14,18 @@ override_dh_auto_clean:
 	dh_auto_clean
 	rm -rf target/
 	rm -rf $(CARGO_HOME)
+	rm -rf $(RUSTUP_HOME)
 	find . -name "*.rlib" -delete 2>/dev/null || true
 	find . -name "*.rmeta" -delete 2>/dev/null || true
 
 override_dh_auto_configure:
-	# Install Rust if not available
+	# Install Rust via rustup if not available. RUSTUP_HOME/CARGO_HOME must
+	# point at writable build-dir paths — the sbuild build user's HOME is
+	# /sbuild-nonexistent, so rustup's default $HOME/.rustup is not writable.
 	if ! which cargo >/dev/null 2>&1; then \
-		mkdir -p $(CARGO_HOME); \
+		mkdir -p $(RUSTUP_HOME) $(CARGO_HOME); \
 		curl https://sh.rustup.rs -sSf | \
-		CARGO_HOME=$(CARGO_HOME) \
+		RUSTUP_HOME=$(RUSTUP_HOME) CARGO_HOME=$(CARGO_HOME) \
 		sh -s -- -y --no-modify-path; \
 	fi
 
