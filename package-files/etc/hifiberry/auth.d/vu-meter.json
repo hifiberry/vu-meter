@@ -1,0 +1,4 @@
+{ "service":"vu-meter", "match_prefix":"/api/vu-meter", "default_tier":"ok",
+  "comment":"The VU meter is a read-only audio-level stream (WebSocket); nothing under it is risky, so the whole service is ok-tier and never prompts for a password.",
+  "rules":[
+  { "tier":"ok","methods":["*"],"paths":["/**"] } ]}

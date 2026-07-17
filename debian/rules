@@ -48,6 +48,10 @@ override_dh_auto_install:
 	mkdir -p debian/hifiberry-vu-meter/usr/share/hifiberry-vu-meter/nginx
 	cp package-files/etc/nginx/hifiberry-vu-meter.nginx debian/hifiberry-vu-meter/usr/share/hifiberry-vu-meter/nginx/
 
+	# Install auth-gateway classification manifest
+	mkdir -p debian/hifiberry-vu-meter/etc/hifiberry/auth.d
+	cp package-files/etc/hifiberry/auth.d/vu-meter.json debian/hifiberry-vu-meter/etc/hifiberry/auth.d/
+
 override_dh_auto_test:
 	# Skip tests
 
