@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# Debian build artefacts
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper.log
+debian/*.substvars
+debian/hifiberry-vu-meter/
