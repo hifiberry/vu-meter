@@ -1,8 +1,9 @@
 use pipewire as pw;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::pod::Pod;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::Duration;
 
@@ -35,6 +36,36 @@ const SAMPLE_RATE: u32 = 48000;
 const NUM_CHANNELS: usize = 2;
 const UPDATE_INTERVAL_MS: u64 = 100;
 const MAX_VALUE_S32: f64 = 2147483648.0;
+const FRAMES_PER_UPDATE: usize = (SAMPLE_RATE as usize * UPDATE_INTERVAL_MS as usize) / 1000;
+/// Hard cap on frames buffered per channel. Without this, a processing
+/// thread stall would let the buffer grow with every incoming sample, and
+/// nothing ever gives that capacity back -- the peak size becomes the
+/// permanent floor. Capping it keeps memory bounded regardless of how long
+/// a stall lasts; the cost is evicting the oldest buffered samples during
+/// that stall, not a growing process.
+const MAX_BUFFERED_FRAMES: usize = FRAMES_PER_UPDATE * 2;
+
+/// Push a sample, evicting the oldest one first once the channel is at its
+/// bound -- a live meter should reflect what's playing now, not stale audio
+/// kept around from before an overload. Returns whether an eviction
+/// happened, so callers can count it. Extracted so the bound itself is
+/// unit-testable without a PipeWire stream.
+fn push_bounded(buf: &mut VecDeque<i32>, sample: i32, cap: usize) -> bool {
+    let evicted = if buf.len() >= cap {
+        buf.pop_front();
+        true
+    } else {
+        false
+    };
+    buf.push_back(sample);
+    evicted
+}
+
+fn new_channel_buffers() -> Vec<VecDeque<i32>> {
+    (0..NUM_CHANNELS)
+        .map(|_| VecDeque::with_capacity(MAX_BUFFERED_FRAMES))
+        .collect()
+}
 
 /// Start the PipeWire capture. Returns the shared meter state, quit flag, and client counter.
 pub fn start_capture(
@@ -44,14 +75,28 @@ pub fn start_capture(
     let quit = Arc::new(AtomicBool::new(false));
     let clients = Arc::new(AtomicUsize::new(0));
 
-    let buffer: Arc<Mutex<Vec<Vec<i32>>>> =
-        Arc::new(Mutex::new(vec![Vec::new(); NUM_CHANNELS]));
+    let buffer: Arc<Mutex<Vec<VecDeque<i32>>>> = Arc::new(Mutex::new(new_channel_buffers()));
+
+    // Counts of periods the realtime callback dropped outright (lock
+    // contended) and samples it overwrote at the bound (channel stayed
+    // full). Both are incremented only with atomics, so bumping them from
+    // the realtime thread is itself realtime-safe; the processing thread
+    // logs them periodically so an overload is visible instead of silent.
+    let dropped_periods = Arc::new(AtomicUsize::new(0));
+    let dropped_samples = Arc::new(AtomicUsize::new(0));
 
     // Spawn PipeWire capture thread (uses main_loop.run(), blocks)
     let buffer_for_pw = buffer.clone();
     let target_clone = target.clone();
+    let dropped_periods_pw = dropped_periods.clone();
+    let dropped_samples_pw = dropped_samples.clone();
     thread::spawn(move || {
-        run_pipewire_loop(target_clone, buffer_for_pw);
+        run_pipewire_loop(
+            target_clone,
+            buffer_for_pw,
+            dropped_periods_pw,
+            dropped_samples_pw,
+        );
     });
 
     // Spawn processing thread that computes levels from the buffer
@@ -59,9 +104,6 @@ pub fn start_capture(
     let quit_for_proc = quit.clone();
     let clients_for_proc = clients.clone();
     thread::spawn(move || {
-        let frames_per_update =
-            (SAMPLE_RATE as f64 * UPDATE_INTERVAL_MS as f64 / 1000.0) as usize;
-
         loop {
             if quit_for_proc.load(Ordering::Relaxed) {
                 break;
@@ -69,9 +111,18 @@ pub fn start_capture(
 
             thread::sleep(Duration::from_millis(UPDATE_INTERVAL_MS));
 
+            let periods = dropped_periods.swap(0, Ordering::Relaxed);
+            let samples = dropped_samples.swap(0, Ordering::Relaxed);
+            if periods > 0 || samples > 0 {
+                eprintln!(
+                    "vu-meter: capture overloaded in the last {}ms: {} periods dropped, {} samples evicted",
+                    UPDATE_INTERVAL_MS, periods, samples
+                );
+            }
+
             // Only process when clients are connected
             if clients_for_proc.load(Ordering::Relaxed) == 0 {
-                // Drain buffer to prevent unbounded growth while idle
+                // Drain buffer to discard stale data while idle
                 if let Ok(mut buf) = buffer.lock() {
                     for ch in buf.iter_mut() {
                         ch.clear();
@@ -84,31 +135,62 @@ pub fn start_capture(
                 continue;
             }
 
-            let mut buf = buffer.lock().unwrap();
-            let mut levels = vec![ChannelLevels::default(); NUM_CHANNELS];
+            // Hold the lock only long enough to drain the samples out --
+            // the realtime capture callback only ever try_locks this same
+            // mutex and drops a period rather than block, so keeping this
+            // critical section to a plain drain (not the dB math below)
+            // keeps that failure window as short as possible. A poisoned
+            // lock (some other panic while it was held) is recovered rather
+            // than propagated, so one bad panic doesn't permanently stall
+            // metering.
+            let mut drained: [Vec<i32>; NUM_CHANNELS] = std::array::from_fn(|_| Vec::new());
+            {
+                let mut buf = match buffer.lock() {
+                    Ok(guard) => guard,
+                    Err(err) => err.into_inner(),
+                };
+                for ch in 0..NUM_CHANNELS {
+                    if buf[ch].len() >= FRAMES_PER_UPDATE {
+                        // Drain everything currently buffered, not just one
+                        // window's worth -- draining only FRAMES_PER_UPDATE
+                        // per tick would let a channel that backed up (e.g.
+                        // during try_lock contention) permanently plateau at
+                        // a higher resident size instead of catching back up
+                        // to real time.
+                        drained[ch] = buf[ch].drain(..).collect();
+                    }
+                    // else: not enough data yet -- leave it buffered for
+                    // next tick rather than discarding a partial window.
+                }
+            }
 
+            // Start from the previous levels so a tick with no new data
+            // (rare: warm-up, or a dropped period) holds the last known
+            // level instead of flashing to a false zero.
+            let mut levels = match state_for_proc.lock() {
+                Ok(s) => s.channels.clone(),
+                Err(err) => err.into_inner().channels.clone(),
+            };
             for ch in 0..NUM_CHANNELS {
-                if buf[ch].len() >= frames_per_update {
-                    let samples: Vec<i32> = buf[ch].drain(..frames_per_update).collect();
+                let samples = &drained[ch];
+                if !samples.is_empty() {
                     let rms_db =
-                        decibel::calculate_rms_db(&samples, MAX_VALUE_S32, MIN_DB, MAX_DB);
+                        decibel::calculate_rms_db(samples, MAX_VALUE_S32, MIN_DB, MAX_DB);
                     let peak_db =
-                        decibel::calculate_peak_db(&samples, MAX_VALUE_S32, MIN_DB, MAX_DB);
-                    let clipping = decibel::detect_clipping(&samples, MAX_VALUE_S32);
+                        decibel::calculate_peak_db(samples, MAX_VALUE_S32, MIN_DB, MAX_DB);
+                    let clipping = decibel::detect_clipping(samples, MAX_VALUE_S32);
 
                     levels[ch] = ChannelLevels {
                         rms_u8: decibel::db_to_u8(rms_db, MIN_DB, MAX_DB),
                         peak_u8: decibel::db_to_u8(peak_db, MIN_DB, MAX_DB),
                         clipping,
                     };
-                } else {
-                    // Not enough data — clear to prevent unbounded growth
-                    buf[ch].clear();
                 }
             }
 
-            if let Ok(mut s) = state_for_proc.lock() {
-                s.channels = levels;
+            match state_for_proc.lock() {
+                Ok(mut s) => s.channels = levels,
+                Err(err) => err.into_inner().channels = levels,
             }
         }
     });
@@ -145,7 +227,9 @@ pub fn start_capture(
 
 fn run_pipewire_loop(
     target: Option<String>,
-    buffer: Arc<Mutex<Vec<Vec<i32>>>>,
+    buffer: Arc<Mutex<Vec<VecDeque<i32>>>>,
+    dropped_periods: Arc<AtomicUsize>,
+    dropped_samples: Arc<AtomicUsize>,
 ) {
     pw::init();
 
@@ -208,10 +292,26 @@ fn run_pipewire_loop(
                     if let Some(slice) = data.data() {
                         let frame_size = 4 * NUM_CHANNELS; // S32LE
                         let num_frames = size / frame_size;
-                        let mut buf = buffer.lock().unwrap();
-                        if buf.is_empty() {
-                            *buf = vec![Vec::new(); NUM_CHANNELS];
-                        }
+
+                        // This runs on PipeWire's realtime thread. It must
+                        // never block on a lock the non-RT processing thread
+                        // can hold for a nontrivial time -- that blocking is
+                        // what produced the millions of xruns reported in
+                        // https://github.com/hifiberry/vu-meter/issues/1.
+                        // If the processing thread has it, drop this period
+                        // instead of waiting for it. A poisoned lock (the
+                        // processing thread panicked while holding it) is
+                        // still just data to us, so recover it rather than
+                        // treating it the same as contention and going
+                        // silent forever.
+                        let mut buf = match buffer.try_lock() {
+                            Ok(guard) => guard,
+                            Err(TryLockError::WouldBlock) => {
+                                dropped_periods.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                            Err(TryLockError::Poisoned(err)) => err.into_inner(),
+                        };
                         for frame in 0..num_frames {
                             for ch in 0..NUM_CHANNELS {
                                 let offset = frame * frame_size + ch * 4;
@@ -222,7 +322,9 @@ fn run_pipewire_loop(
                                         slice[offset + 2],
                                         slice[offset + 3],
                                     ]);
-                                    buf[ch].push(sample);
+                                    if push_bounded(&mut buf[ch], sample, MAX_BUFFERED_FRAMES) {
+                                        dropped_samples.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                         }
@@ -276,4 +378,58 @@ fn run_pipewire_loop(
 
     // Run the main loop (blocks until quit)
     main_loop.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_bounded_evicts_oldest_and_stays_bounded() {
+        let mut buf = VecDeque::with_capacity(4);
+        let mut evictions = 0;
+        for sample in 0..1000 {
+            if push_bounded(&mut buf, sample, 4) {
+                evictions += 1;
+            }
+        }
+        assert_eq!(buf.len(), 4);
+        assert_eq!(evictions, 1000 - 4);
+        // Keeps the newest samples, not the oldest -- a live meter should
+        // reflect what's playing now, not audio from a thousand samples ago.
+        assert_eq!(buf, VecDeque::from(vec![996, 997, 998, 999]));
+    }
+
+    #[test]
+    fn new_channel_buffers_preallocates_to_the_bound() {
+        let buffers = new_channel_buffers();
+        assert_eq!(buffers.len(), NUM_CHANNELS);
+        for buf in &buffers {
+            assert!(buf.capacity() >= MAX_BUFFERED_FRAMES);
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn poisoned_buffer_lock_is_recoverable_not_fatal() {
+        let buffer: Arc<Mutex<Vec<VecDeque<i32>>>> = Arc::new(Mutex::new(new_channel_buffers()));
+        let poisoner = buffer.clone();
+        let _ = thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("simulated panic while holding the buffer lock");
+        })
+        .join();
+
+        // The realtime callback must be able to tell a poisoned lock apart
+        // from ordinary contention (WouldBlock) and recover it, rather than
+        // treating both the same and dropping capture forever.
+        let lock_result = buffer.try_lock();
+        match lock_result {
+            Err(TryLockError::Poisoned(err)) => {
+                drop(err.into_inner());
+            }
+            Err(TryLockError::WouldBlock) => panic!("expected Poisoned, got WouldBlock"),
+            Ok(_) => panic!("expected Poisoned, got Ok"),
+        }
+    }
 }
