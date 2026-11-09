@@ -1,3 +1,13 @@
+hifiberry-vu-meter (0.1.5) stable; urgency=medium
+
+  * Restart vu-meter on upgrade, and stop it on removal. It runs as a
+    systemd user service of the HiFiBerry user, which debhelper neither
+    restarts nor stops, so an upgrade left the old code running -- and a
+    removal left it running at all -- until the next reboot or login. The
+    restart is a try-restart: a service that is not running stays off.
+
+ -- HiFiBerry <support@hifiberry.com>  Mon, 09 Nov 2026 14:52:10 +0000
+
 hifiberry-vu-meter (0.1.4) stable; urgency=medium
 
   * Fix a memory/CPU leak that could starve the whole device after about a
